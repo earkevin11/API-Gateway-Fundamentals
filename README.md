@@ -1,203 +1,202 @@
-# API-Gateway-Fundamentals
+# API Gateways Explained
 
-# API Gateways Explained (AWS API Gateway and Azure API Management)
+A beginner-friendly guide to AWS API Gateway and Azure API Management (APIM) for cloud security engineers and incident responders.
 
-A learning guide for cloud security engineers and incident responders.
+The companion guide, `API_Gateway_Investigation_and_Containment_README.md`, covers attacks, investigation, and containment.
+
+---
+
+## Table of contents
+
+1. [What an API gateway is](#1-what-an-api-gateway-is)
+2. [Key terms in plain English](#2-key-terms-in-plain-english)
+3. [Walkthrough of one request](#3-walkthrough-of-one-request)
+4. [API gateway vs load balancer vs WAF](#4-api-gateway-vs-load-balancer-vs-waf)
+5. [One gateway per app or one for many](#5-one-gateway-per-app-or-one-for-many)
+6. [What organizations used before API gateways](#6-what-organizations-used-before-api-gateways)
+7. [Security benefits and what breaks them](#7-security-benefits-and-what-breaks-them)
 
 ---
 
 ## 1. What an API gateway is
 
-An **API gateway** is a managed front door that sits between callers (mobile apps, websites, partners, other services) and the backend systems that do the work. Every request goes through it first. The gateway decides whether the request is allowed, where to send it, how fast callers may go, and it records what happened.
+**In one sentence:** an API gateway is a managed front door that every request passes through before it reaches your application's backend.
 
-**Analogy:** the front desk of an office building.
+First, what is an **API**? An API (Application Programming Interface) is how one program asks another program for something. When a mobile app shows your bank balance, it sent a request like `GET /accounts/123/balance` to the bank's API and got data back.
 
-| Front desk | API gateway |
+The **gateway** sits in front of those APIs and handles the jobs every API needs, so each app team doesn't have to build them:
+
+| The gateway... | Like a building's front desk that... |
 | --- | --- |
-| Checks visitor ID | Authenticates the caller (JWT, API key, IAM, mTLS) |
-| Knows which office is on which floor | Routes `GET /claims/{id}` to the claims service |
-| Enforces visiting hours and visitor limits | Throttling, quotas, rate limits |
-| Signs everyone in and out | Access logs (who, what, when, result) |
-| Turns away people on the banned list | IP filtering, WAF integration, resource policies |
-| Can close the building's front entrance | Containment: block, throttle, or remove the endpoint |
+| Checks who the caller is | Checks visitor ID |
+| Sends the request to the right backend | Tells visitors which floor and office to go to |
+| Limits how often a caller can make requests | Limits how many visitors come in at once |
+| Logs every request | Keeps a sign-in sheet |
+| Can block or shut off access | Can lock the front entrance |
 
-| Cloud | Service |
+```
+Caller (mobile app, website, partner)
+        │
+        ▼
+ ┌──────────────────┐
+ │   API Gateway    │  ← checks identity, limits, logs, routes
+ └──────────────────┘
+        │
+        ▼
+Backend (Lambda function, server, database)  ← never exposed directly
+```
+
+| Cloud | Service name |
 | --- | --- |
-| AWS | **Amazon API Gateway** (REST API, HTTP API, WebSocket API) |
+| AWS | **Amazon API Gateway** |
 | Azure | **Azure API Management (APIM)** |
-| Other common products | Apigee (Google), Kong, MuleSoft, Tyk, NGINX-based gateways |
+| Other vendors | Apigee (Google), Kong, MuleSoft |
 
 ---
 
-## 2. Core building blocks
+## 2. Key terms in plain English
 
-| Concept | AWS API Gateway | Azure APIM | What it does |
+| Term | Plain-English meaning | AWS name | Azure APIM name |
 | --- | --- | --- | --- |
-| The API | REST API / HTTP API resource | API inside an APIM instance | Group of routes for one product or service |
-| Route | Resource + method (`POST /upload`) | Operation | One callable action |
-| Backend | Integration (Lambda, HTTP, AWS service) | Backend (App Service, Function, any URL) | Where the request is sent |
-| Authentication | Authorizer: IAM, Cognito, Lambda, JWT | `validate-jwt` policy, client certs | Proves who the caller is |
-| Caller identification and metering | API keys + usage plans | Products + subscription keys | Who is calling and how much they may call |
-| Environment | Stage (`dev`, `prod`) | Revisions, or separate instances per env | A deployed, callable version |
-| Traffic limits | Stage and method throttling | `rate-limit`, `quota` policies | Protect backends from overload and abuse |
-| Network restrictions | Resource policy, private APIs (VPC endpoint) | `ip-filter` policy, VNet integration | Who can reach it at the network level |
-| Logs | CloudWatch execution and access logs | Diagnostics to Log Analytics | Request-level evidence |
-| Config change audit | CloudTrail | Azure Activity Log | Who changed the gateway |
+| **Route** | One thing a caller can ask for, like `GET /claims/{id}` | Resource + method | Operation |
+| **Backend / integration** | The code or service that actually does the work | Integration (Lambda, HTTP endpoint, AWS service) | Backend |
+| **Authorizer** | The check that proves who the caller is, usually by validating a login token | Authorizer (IAM, Cognito, Lambda, JWT) | `validate-jwt` policy |
+| **JWT** | A signed login token issued after a user signs in, like an Entra ID access token | Same | Same |
+| **API key** | A code that identifies which customer or partner is calling. **Not a password.** It can be copied out of an app. | API key + usage plan | Subscription key + product |
+| **Throttling** | A speed limit on requests | Stage / method throttling | `rate-limit`, `quota` policies |
+| **Stage** | A published, live version of the API, such as `dev` or `prod`. Each has its own URL. | Stage | Revision, or a separate instance |
+| **Deployment** | A saved snapshot of the API's configuration. A stage points to one deployment. | Deployment | Revision |
+| **Resource policy** | Rules for which networks or accounts can reach the API at all | Resource policy | `ip-filter` policy, VNet integration |
+| **Execution role** | The cloud identity the backend uses to touch other services (S3, databases) | IAM role | Managed identity |
+| **Access log** | A record of each request: who, what, when, result | CloudWatch access logs | `ApiManagementGatewayLogs` |
+| **Control plane** | Settings that define the API (who changes the config) | Logged in CloudTrail | Logged in the Activity Log |
+| **Data plane** | The actual requests flowing through the API | Logged in access logs | Logged in gateway logs |
 
-**Important:** API keys (AWS) and subscription keys (APIM) identify and meter callers. They are **not** strong authentication. A key in a mobile app can be extracted. Real authentication comes from authorizers or `validate-jwt`.
+**Stage vs deployment, simply:** a deployment is like a saved draft of a document, and a stage is like publishing that draft to a public website. Deleting the stage takes the website down, but the drafts still exist.
 
 ---
 
-## 3. One gateway per app, or one for many?
+## 3. Walkthrough of one request
 
-**Short answer:** it depends on the platform, but most organizations **share gateway infrastructure across many apps** and separate by environment and sensitivity.
+A member opens a healthcare app to check a claim.
 
-### AWS API Gateway
-
-AWS API Gateway is fully serverless and billed per request, so there is no "instance" to share. Each API is its own resource.
-
-| Pattern | How it looks | When used |
+| Step | What happens | Which part does it |
 | --- | --- | --- |
-| **One API per app or microservice** (most common) | `claims-api`, `member-api`, `provider-api` each a separate REST API | Teams own their APIs; clean blast radius and permissions |
-| **Shared custom domain** | `api.company.com` with base path mappings: `/claims` → claims-api, `/members` → member-api | One public hostname, many APIs behind it |
-| **Central platform team API** | One big API fronting many backends | Smaller orgs or tightly governed environments |
+| 1 | App sends `GET /claims/123` with the member's login token | Caller |
+| 2 | Request is checked for attacks like SQL injection | WAF (see section 4) |
+| 3 | Token is validated. A bad or expired token gets **401 Unauthorized** and stops here. | Authorizer |
+| 4 | Caller's request rate is checked. Too many requests get **429 Too Many Requests**. | Throttling |
+| 5 | Request is sent to the `getClaim` Lambda function | Route + integration |
+| 6 | Lambda reads the claim using a role that can access **only** the claims table | Backend + execution role |
+| 7 | Response returns to the app with **200 OK**, and the request is logged | Gateway + access log |
 
-### Azure APIM
+**HTTP status codes you'll see constantly:**
 
-APIM is a **provisioned instance** (Developer, Basic, Standard, Premium, v2 tiers) with real cost, so it is almost always shared.
-
-| Pattern | How it looks | When used |
-| --- | --- | --- |
-| **Shared instance per environment** (most common) | `apim-prod` hosts 50 APIs from many teams; `apim-dev` separate | Cost efficiency, central governance |
-| **Separate instances by sensitivity** | `apim-internal` vs `apim-external`, or a dedicated instance for PHI APIs | Compliance, isolation of internet-facing APIs |
-| **Federated / workspaces** | One instance, teams manage their own APIs in isolated workspaces | Large orgs balancing central control and team autonomy |
-
-### Security implications of sharing
-
-| Shared gateway | Dedicated gateway per app |
+| Code | Meaning |
 | --- | --- |
-| One place to enforce baseline policies (auth, logging, WAF) | Smaller blast radius if misconfigured or compromised |
-| One place to investigate and contain | Containment affects only one app |
-| Misconfiguration or outage hits every app | Policy drift: each team configures security differently |
-| Admin role is very powerful; protect it like Global Admin | More resources to monitor and audit |
-
-**IR takeaway:** before containing at the gateway level, know **what else shares it**. Deleting a shared stage or blocking a shared domain can take down unrelated apps.
-
----
-
-## 4. What organizations used before API gateways
-
-| Era | Approach | Problems |
-| --- | --- | --- |
-| Early web (1990s-2000s) | Apps exposed directly to the internet; each app did its own auth, logging, rate limiting | Inconsistent security, every team reinvented auth, no central visibility |
-| SOA era (2000s) | **Enterprise Service Bus (ESB)** and XML gateways (IBM DataPower, CA/Broadcom Layer7, Oracle) | Heavy, expensive, slow to change, SOAP/XML focused |
-| Reverse proxy era | NGINX, Apache, F5 BIG-IP in front of apps | Good at routing and TLS, but API-aware features (keys, quotas, JWT) needed custom scripting |
-| Cloud and microservices (2010s+) | **API gateways** (Apigee, Kong, AWS API Gateway, Azure APIM) | Purpose-built for REST/JSON APIs, managed, policy-driven |
-| Today | API gateways plus service meshes (Istio, Linkerd) for service-to-service traffic inside clusters | Gateway handles north-south traffic (in/out); mesh handles east-west (between services) |
+| 200 | Success |
+| 401 | Not authenticated (missing or bad token) |
+| 403 | Authenticated but not allowed, or blocked by policy or WAF |
+| 404 | Route doesn't exist |
+| 429 | Throttled, too many requests |
+| 5xx | Server or backend error |
 
 ---
 
-## 5. Security benefits
+## 4. API gateway vs load balancer vs WAF
 
-| Benefit | What it gives you | Example |
-| --- | --- | --- |
-| **Centralized authentication** | Backends never see unauthenticated traffic | Invalid JWT gets 401 at the gateway; the Lambda never runs |
-| **Reduced attack surface** | Only defined routes are reachable; backends stay private | Backend in a private subnet, only the gateway can call it |
-| **Rate limiting and quotas** | Slows brute force, scraping, and DoS | 100 req/s per client; scraper hits 429 |
-| **Consistent logging** | One log format for every API | Every call logged with IP, status, latency, request ID |
-| **Input validation** | Reject malformed requests before they reach code | Request schema validation blocks unexpected fields |
-| **Secrets kept out of clients** | Gateway adds backend credentials, not the caller | APIM policy fetches a Key Vault secret for the backend |
-| **WAF integration** | Blocks injection and known bad IPs | AWS WAF or Azure Front Door/App Gateway WAF in front |
-| **Single containment point** | Block, throttle, or remove access in one place | Throttle stage to 0 during an incident |
-| **Governance** | Inventory of every exposed API | Find shadow APIs and routes with no authorizer |
+**In one sentence:** they do different jobs and are usually used together. The WAF blocks attacks, the gateway knows who the caller is, and the load balancer spreads traffic across servers.
 
-### Common security mistakes
-
-| Mistake | Risk |
-| --- | --- |
-| Route with authorization `NONE` | Anyone on the internet can call the backend |
-| Treating API keys as authentication | Leaked key = full access |
-| Logging disabled (default for access logs) | No evidence during an incident |
-| Over-privileged backend role (`s3:*`) | One API bug exposes all data |
-| Default `execute-api` endpoint left on when a custom domain with WAF is used | Attacker bypasses WAF via the raw endpoint |
-| Verbose errors returned to callers | Leaks stack traces and internal names |
-
----
-
-## 6. API gateway vs load balancer vs WAF
-
-They solve different problems and are usually **used together**, not instead of each other.
-
-| Capability | Load balancer (ALB / Azure App Gateway, Azure LB) | WAF (AWS WAF / Azure WAF) | API gateway (AWS API Gateway / APIM) |
+| Question | Load balancer | WAF | API gateway |
 | --- | --- | --- | --- |
-| Main job | Spread traffic across healthy servers | Block malicious request patterns | Manage, secure, and govern APIs |
-| OSI focus | Layer 4 (NLB/Azure LB) or Layer 7 (ALB/App Gateway) | Layer 7 inspection | Layer 7, API-aware |
-| Routing | By host/path to target groups | No routing | By route, method, version, stage |
-| Authentication | Limited (ALB can do OIDC) | None | Strong: JWT, OAuth, IAM, mTLS, custom authorizers |
-| Per-client rate limits and quotas | No | Rate-based rules by IP only | Yes, per key, per user, per product |
-| SQLi/XSS/bot protection | No | **Yes, its core job** | Basic validation only; relies on WAF |
-| Request/response transformation | No | No | Yes |
-| API keys, developer portal, versioning | No | No | Yes |
-| Best for | High-throughput traffic to servers or containers | Filtering attacks before they reach anything | Exposing APIs safely to apps and partners |
-| Cost model | Hourly + capacity units | Per rule + per request | Per request (AWS) or per instance (APIM) |
+| Main job | Spread traffic across healthy servers | Block malicious requests | Manage and secure APIs |
+| Knows *who* the caller is? | Barely (ALB can do basic sign-in) | No | **Yes**: tokens, keys, IAM |
+| Blocks SQL injection and bots? | No | **Yes, its core job** | Only basic input checks |
+| Per-customer limits (Partner A: 10,000 calls/day)? | No | No (only per-IP rate limits) | **Yes** |
+| Routes by URL path? | Yes | No | Yes |
+| Changes request or response format? | No | No | Yes |
+| Handles non-web traffic (raw TCP/UDP)? | Yes (Network LB) | No | No |
+| AWS service | ALB, NLB | AWS WAF | API Gateway |
+| Azure service | Application Gateway, Azure Load Balancer | Azure WAF (Front Door or App Gateway) | APIM |
 
-### Where each is better or worse
+### Strengths and weaknesses of the gateway
 
-| Gateway is **better** than a load balancer at | Gateway is **worse** than a load balancer at |
+| Gateway is better at | Gateway is worse at |
 | --- | --- |
-| Authenticating callers and enforcing per-client quotas | Raw throughput and latency at very high volume |
-| API versioning, transformation, developer onboarding | Long-lived connections, non-HTTP protocols (NLB handles TCP/UDP) |
-| API-level logging and governance | Cost at massive scale (per-request pricing adds up) |
+| Authenticating callers and enforcing per-customer quotas | Very high-volume, low-latency traffic (a load balancer is cheaper and faster) |
+| Versioning, transforming, and governing APIs | Detecting attack payloads and bots (that's the WAF's job) |
+| Giving one consistent log format for every API | Non-HTTP protocols |
 
-| Gateway is **better** than a WAF at | Gateway is **worse** than a WAF at |
-| --- | --- |
-| Knowing *who* the caller is | Detecting injection, XSS, bots, and known bad IPs |
-| Business rules (Partner A gets 10k calls/day) | Managed threat-intel rule sets |
-
-### Typical layered design
+### How they're layered together
 
 ```
 Internet
-   │
    ▼
-[ WAF ]               ← blocks attacks, bad IPs, bots
-   │
+[ WAF ]                ← blocks attack patterns and bad IPs
    ▼
-[ API Gateway / APIM ] ← authenticates, throttles, routes, logs
-   │
+[ API Gateway / APIM ] ← checks identity, applies limits, routes, logs
    ▼
-[ Load Balancer ]      ← spreads load across backend instances (if not serverless)
-   │
+[ Load balancer ]      ← spreads load (skipped for serverless backends like Lambda)
    ▼
-[ Backend services ]   ← Lambda, containers, VMs, databases (private)
+[ Backends ]           ← kept private
 ```
 
-Azure equivalent: Front Door (with WAF) → APIM → Application Gateway or internal LB → App Service / AKS / Functions.
+Azure version: Front Door with WAF → APIM → Application Gateway or internal load balancer → App Service, AKS, or Functions.
 
 ---
 
-## 7. Worked example: a healthcare member portal
+## 5. One gateway per app or one for many
 
-1. The mobile app sends `GET /claims/123` with the member's login token.
-2. **WAF** checks for SQL injection and known bad IPs. Clean request passes.
-3. **API Gateway** validates the token with the authorizer. Invalid token gets 401.
-4. Gateway checks throttling: this member is under 100 requests per minute.
-5. Gateway routes to the `getClaim` Lambda, which runs with a role that can read **only** the claims table.
-6. Lambda returns the claim; gateway logs IP, user, status 200, response size, latency.
+**In one sentence:** most organizations share gateway infrastructure across many apps and separate it by environment (dev vs prod) and sensitivity.
 
-**What an attacker would try:** steal a token, find a route with no authorizer, enumerate claim IDs (`/claims/1` through `/claims/100000`), or modify the gateway config if they compromise an admin identity. The companion README covers how to detect and contain each.
+| | AWS API Gateway | Azure APIM |
+| --- | --- | --- |
+| Billing model | Pay per request; nothing to provision | Pay for a running instance |
+| Most common pattern | One API per app or microservice (`claims-api`, `member-api`) | One shared instance per environment (`apim-prod` hosting dozens of APIs) |
+| How they share | A custom domain maps paths to APIs: `api.company.com/claims` → claims-api | Many teams publish APIs into the same instance, sometimes in separate workspaces |
+| Extra isolation when needed | Separate AWS accounts for sensitive apps | Separate instances for internal vs internet-facing, or for PHI |
 
----
+### Shared vs dedicated: the security trade-off
 
-## 8. Quick reference
-
-| Question | Answer |
+| Shared gateway | Dedicated gateway per app |
 | --- | --- |
-| What is it? | Managed front door for APIs: auth, routing, throttling, logging |
-| AWS service | Amazon API Gateway |
-| Azure service | Azure API Management (APIM) |
-| Shared or 1-to-1? | AWS: usually one API per app, often behind a shared domain. APIM: usually one shared instance per environment |
-| Replaced what? | Direct exposure, ESBs, XML gateways, hand-scripted reverse proxies |
-| Biggest security benefit | Central enforcement of authentication and a single containment point |
-| Use with a WAF? | Yes. The WAF stops attack patterns; the gateway knows who the caller is |
-| Most dangerous misconfig | A route with no authorizer in front of a privileged backend |
+| ✅ One place to enforce auth, logging, and WAF | ✅ A mistake or incident affects only one app |
+| ✅ One place to investigate and contain | ❌ Each team may configure security differently |
+| ❌ A misconfiguration or outage hits every app | ❌ More things to monitor |
+| ❌ Gateway admin role is very powerful | |
+
+**Why IR cares:** before you block or delete anything at the gateway, find out what else shares it. Containing a shared domain can take down unrelated apps.
+
+---
+
+## 6. What organizations used before API gateways
+
+| Era | Approach | Why it fell short |
+| --- | --- | --- |
+| 1990s-2000s | Apps exposed directly; every app built its own login, logging, and limits | Inconsistent security, no central view |
+| 2000s | Enterprise service buses and XML gateways (IBM DataPower, Layer7) | Expensive, heavy, slow to change |
+| 2000s-2010s | Reverse proxies (NGINX, Apache, F5) | Great for routing and TLS, but token checks and quotas needed custom scripting |
+| 2010s-today | Purpose-built API gateways (AWS API Gateway, APIM, Apigee, Kong) | Managed, policy-driven, built for modern REST/JSON APIs |
+
+Today, gateways handle traffic coming **into** an environment (north-south). Service meshes such as Istio often handle traffic **between** services inside a cluster (east-west).
+
+---
+
+## 7. Security benefits and what breaks them
+
+Each benefit only holds if it's configured correctly. The right column is what attackers look for.
+
+| Benefit | Example | Misconfiguration that breaks it |
+| --- | --- | --- |
+| **Central authentication**: backends never see unauthenticated traffic | Bad token gets 401; the Lambda never runs | A route with authorization set to `NONE` |
+| **Smaller attack surface**: only defined routes are reachable | Backend sits in a private subnet | Default `execute-api` URL left open, bypassing the WAF on the custom domain |
+| **Rate limiting**: slows brute force and scraping | Scraper gets 429 after 100 requests/second | No throttling, or limits set far too high |
+| **Caller identification**: know which partner made each call | Each partner has its own key | Treating API keys as passwords; a leaked key equals full access |
+| **Least-privilege backends**: limit damage from a bug | Lambda can read only the claims table | Execution role with `s3:*` or admin rights |
+| **Consistent logging**: evidence for every request | Every call logged with IP, status, size | Access logs are **off by default** in AWS |
+| **Safe error handling** | Generic error messages | Stack traces and internal names returned to callers |
+| **Single containment point**: shut off access in one place during an incident | Throttle a stage to zero | No documented owner or approval path for prod changes |
+
+**Azure parallel:** a route with no authorizer in AWS is the same risk as removing the `validate-jwt` policy from an API in APIM. Authentication silently disappears and the backend is exposed.
+
+For detecting and responding to these issues, see `API_Gateway_Investigation_and_Containment_README.md`.
